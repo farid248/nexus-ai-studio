@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// AI Chat — conversation threads persisted with full message history.
+// `summary` + `summaryMessageCount` implement episodic memory: a rolling
+// LLM-generated summary of older messages so long sessions stay focused
+// without blowing the context window.
+model Conversation {
+  id                 String    @id @default(cuid())
+  title              String    @default("New Chat")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  summary            String?
+  summaryMessageCount Int      @default(0)
+  messages           Message[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // "user" | "assistant"
+  content        String
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Long-term (semantic) memory — durable facts about the user extracted
+// automatically after chat exchanges, or added manually from the UI.
+// Injected into every conversation's system prompt; shared across chats.
+model Memory {
+  id         String    @id @default(cuid())
+  content    String    @unique
+  category   String    @default("fact") // personal | preference | goal | skill | project | fact
+  importance Int       @default(3) // 1..5
+  pinned     Boolean   @default(false)
+  source     String    @default("auto") // auto | manual
+  useCount   Int       @default(0)
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([pinned, importance, updatedAt])
+}
+
+// AI Image Generation — generated PNGs saved to public/generated/, URL stored here
+model GeneratedImage {
+  id           String    @id @default(cuid())
+  prompt       String
+  size         String
+  url          String?
+  status       String    @default("done")
+  errorMessage String?
+  createdAt    DateTime  @default(now())
+}
+
+// Speech-to-Text — transcript archive
+model Transcription {
+  id        String   @id @default(cuid())
+  fileName  String
+  text      String
+  duration  Float?
+  createdAt DateTime @default(now())
+}
+
+// Prompt Optimization — every "improve my prompt" request is logged with the
+// original + optimized versions so the studio can show analytics (how many
+// prompts were enhanced and how many optimizations the user actually applied).
+model PromptOptimization {
+  id               String   @id @default(cuid())
+  originalPrompt   String
+  optimizedPrompt  String
+  mode             String   @default("chat") // chat | image | vision
+  improvements     String   @default("") // JSON array of short improvement notes
+  applied          Boolean  @default(false) // true once the user sends the optimized version
+  createdAt        DateTime @default(now())
+}
