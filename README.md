@@ -38,6 +38,14 @@ A full-stack AI platform demonstrating how to ship **real** multimodal AI featur
 
 ---
 
+## 📸 Screenshots
+
+| Dashboard | Vision Analysis |
+|:---:|:---:|
+| ![Dashboard — hero, live usage stats and the six AI modules](docs/screenshots/dashboard.png) | ![Vision Analysis — uploaded image with VLM answer](docs/screenshots/vision-analysis.png) |
+
+---
+
 ## 🤖 AI Models and Selection Rationale
 
 | Task | Model / Engine | Why it was chosen |
