@@ -1,6 +1,6 @@
 # Nexus AI Studio — Complete Project Documentation (English)
 
-> A production-grade multimodal AI platform built as a flagship AI-Engineering portfolio project.
+> A production-grade multimodal AI platform — six AI capabilities unified behind one full-stack TypeScript application.
 > This document is the full engineering record of everything designed, built, debugged and verified in the project.
 
 ---
@@ -9,23 +9,26 @@
 
 1. [Project Overview](#1-project-overview)
 2. [Tech Stack](#2-tech-stack)
-3. [System Architecture](#3-system-architecture)
-4. [The Six Modules](#4-the-six-modules)
-   - 4.1 Dashboard
-   - 4.2 AI Chat
-   - 4.3 Agent Memory (3-Layer)
-   - 4.4 Vision Analysis
-   - 4.5 Image Studio (Async Job Queue)
-   - 4.6 Speech Lab (STT + TTS)
-5. [Cross-Cutting Feature: Prompt Optimizer](#5-cross-cutting-feature-prompt-optimizer)
-6. [API Reference](#6-api-reference)
-7. [Database Schema](#7-database-schema)
-8. [Engineering War Stories — Problems, Diagnosis & Fixes](#8-engineering-war-stories)
-9. [Frontend Engineering Details](#9-frontend-engineering-details)
-10. [Verification Methodology](#10-verification-methodology)
-11. [Setup & Running Locally](#11-setup--running-locally)
-12. [Project Structure](#12-project-structure)
-13. [Author](#13-author)
+3. [AI Models and Selection Rationale](#3-ai-models-and-selection-rationale)
+4. [How Output Quality Is Engineered](#4-how-output-quality-is-engineered)
+5. [Skills Needed and What Each One Serves](#5-skills-needed-and-what-each-one-serves)
+6. [System Architecture](#6-system-architecture)
+7. [The Six Modules](#7-the-six-modules)
+   - 7.1 Dashboard
+   - 7.2 AI Chat
+   - 7.3 Agent Memory (3-Layer)
+   - 7.4 Vision Analysis
+   - 7.5 Image Studio (Async Job Queue)
+   - 7.6 Speech Lab (STT + TTS)
+8. [Cross-Cutting Feature: Prompt Optimizer](#8-cross-cutting-feature-prompt-optimizer)
+9. [API Reference](#9-api-reference)
+10. [Database Schema](#10-database-schema)
+11. [Engineering War Stories — Problems, Diagnosis & Fixes](#11-engineering-war-stories)
+12. [Frontend Engineering Details](#12-frontend-engineering-details)
+13. [Verification Methodology](#13-verification-methodology)
+14. [Setup & Running Locally](#14-setup--running-locally)
+15. [Project Structure](#15-project-structure)
+16. [Author](#16-author)
 
 ---
 
@@ -45,7 +48,7 @@
 The project was built end-to-end (frontend, backend, database, AI integrations) with a strict policy:
 **every feature ships only after a full end-to-end verification in a real browser with zero console errors.**
 
-Two features make this project stand out on a CV:
+Three features make this project distinctive:
 
 1. **A 3-layer long-term memory engine** — the agent remembers facts about the user across sessions (semantic), summarizes long conversations (episodic), and keeps a working window — with a full management UI on top.
 2. **A cross-cutting Prompt Optimizer** — before any prompt is executed, the system can suggest an improved version using mode-specific meta-prompting strategies, with applied-rate analytics.
@@ -75,7 +78,67 @@ Two features make this project stand out on a CV:
 
 ---
 
-## 3. System Architecture
+## 3. AI Models and Selection Rationale
+
+The platform consumes every model as a managed API service through a single server-side SDK singleton (`src/lib/zai.ts`). This section documents exactly which model powers each capability and why it was chosen.
+
+| Capability | Model / Engine | Class | Why this one |
+|---|---|---|---|
+| Conversational chat | **GLM-4.6** (`chat.completions`) | Instruction-tuned LLM | Strong instruction-following with a fast time-to-first-token — critical for SSE streaming UX; per-call parameter control (the reasoning mode can be disabled on latency-critical paths) |
+| Vision analysis | **GLM VLM turbo** (`glm-5v-turbo`) | Vision-Language Model | Turbo-class variant tuned for interactive latency; accepts base64 image input and returns structured markdown descriptions |
+| Image generation | **Diffusion model** (`images.generations`) | Text-to-image diffusion | High-fidelity output up to 1440px across 5 aspect ratios in a single call; reliable enough to power a live gallery |
+| Speech-to-text | **ASR engine** (audio transcription) | Speech recognition | Strong English transcription; known non-Latin limitations handled with honest UX (see §11.3) |
+| Text-to-speech | **TTS engine** (audio speech) | Neural TTS | 7 natural voices with adjustable speed; returns base64 WAV that plugs directly into `<audio>` |
+
+**Why API integration instead of self-hosting weights:**
+
+| Factor | API-based (chosen) | Self-hosted |
+|---|---|---|
+| Infrastructure | Zero GPU operations | GPU provisioning, drivers, scaling |
+| Latency profile | Predictable, provider-backed | Variable under load |
+| Model quality | Provider keeps models current | Frozen at deploy time |
+| Engineering focus | Application layer: orchestration, UX, reliability | Split between infra and app |
+
+The trade-off is direct control over the weights — which is exactly why this project's quality engineering happens at the **prompt and orchestration layer** (next section) rather than in training. Because all five engines are invoked through one integration point, a provider swap never touches feature code.
+
+---
+
+## 4. How Output Quality Is Engineered
+
+Output accuracy in this system is not a property of the models alone — it is engineered into the application at the prompt and context layer. Every technique below is shipped code, not theory:
+
+1. **Structured system prompts** — every model call defines a persona and an explicit output contract: the chat persona, the memory-extraction guidance, the translation and rewriting instructions. Consistent structure in, consistent quality out.
+2. **Long-term memory context injection** — the top-N highest-importance memories are injected into the system prompt of every conversation (`buildMemoryBlock` in `src/lib/memory.ts`), so answers are personalized and stay consistent across sessions.
+3. **Stage-0 translation layer** — non-Latin prompts (e.g. Arabic) are translated into rich English diffusion prompts *before* the image API call, because the safety filter false-flags what it cannot parse (§11.1). Arabic input stopped failing the moment this shipped.
+4. **Safety-filter recovery rewriter** — when a generation is rejected (error 1301), a constrained rewriter produces a safe English alternative and retries once, instead of failing the job.
+5. **Prompt Optimizer meta-prompting** — a dedicated module critiques and rewrites user prompts using mode-specific strategies before execution, with applied-rate analytics closing the feedback loop.
+6. **Per-call parameter tuning** — the reasoning mode is disabled on latency-critical paths (chat streaming, translation, optimization) where response speed matters more than chain-of-thought, keeping first-token latency low.
+7. **Schema-level quality guards** — unique constraints deduplicate extracted memories; importance scoring and pinning decide which facts earn limited context slots.
+8. **End-to-end verification loop** — every output path is validated in a real browser under a zero-console-error policy before it ships (§13).
+
+The combined result: the models return the same accuracy they would for any caller — but the system around them ensures the *inputs* are well-formed, the *context* is rich, the *failures* recover, and the *outputs* are verified.
+
+---
+
+## 5. Skills Needed and What Each One Serves
+
+| Skill | Where it serves in this project |
+|---|---|
+| **TypeScript (strict)** | Typed contracts end-to-end — request/response DTOs, DB models, client stores — eliminating a whole class of runtime bugs before they ship |
+| **Next.js 16 App Router + React 19** | Single-route SPA-feel architecture; server-only API routes keep model credentials off the client |
+| **Server-Sent Events (SSE)** | Real token-by-token streaming for the chat UX, with graceful degradation to error frames mid-stream |
+| **Async architecture & job queues** | The image pipeline: sub-second API responses with detached, 180s-guarded background jobs — timeout-proof by design |
+| **Prisma & schema design** | 6 related models; unique constraints and importance scoring power the memory engine's dedupe and ranking |
+| **TanStack Query v5** | Server-state caching, invalidation, and conditional polling (3s only while jobs are processing) |
+| **Zustand** | Minimal client state (view switching, UI state) without boilerplate |
+| **Prompt engineering** | The entire output-quality layer in §4 — system prompts, translation, rewriting, meta-prompting |
+| **Systems debugging & root-cause analysis** | The war stories in §11 — separating user symptoms from actual causes using logs, DB forensics and probe matrices |
+| **Verification methodology** | Browser-level E2E checks with a zero-console-error ship policy (§13) |
+| **Tailwind CSS 4 + shadcn/ui** | Responsive, accessible, themeable interface (dark/light) built at production speed |
+
+---
+
+## 6. System Architecture
 
 The app exposes **one user-visible route** (`/`) with client-side view switching, giving an SPA-feel with zero navigation latency, while all AI work happens behind server API routes.
 
@@ -131,9 +194,9 @@ flowchart LR
 
 ---
 
-## 4. The Six Modules
+## 7. The Six Modules
 
-### 4.1 Dashboard
+### 7.1 Dashboard
 
 - **Live usage statistics** — conversations, messages, images, transcriptions, memories, prompts optimized (TanStack Query with periodic refetch; each stat is a live DB count).
 - **Module cards** — one card per AI module with a short description; clicking navigates to the module.
@@ -142,17 +205,17 @@ flowchart LR
 - **Recent generations strip** — the latest 6 generated images.
 - Hero section, dark/light theme support, fully responsive.
 
-### 4.2 AI Chat
+### 7.2 AI Chat
 
 - **Real SSE streaming** — tokens render as they arrive with an animated streaming cursor; the response is persisted server-side when the stream flushes.
 - **Conversation management** — history panel (desktop sidebar aside + mobile Sheet), delete with cascade, conversation titles, new chat.
-- **Context handling** — a working window of the last 16 messages + rolling summary + memory block (see 4.3) is sent as context.
+- **Context handling** — a working window of the last 16 messages + rolling summary + memory block (see 7.3) is sent as context.
 - **Markdown rendering** — headings, lists, tables, **syntax-highlighted code blocks with one-click copy buttons**.
 - **Voice input** — mic button records via `MediaRecorder`, sends the audio to `/api/transcribe`, and drops the transcript into the composer.
 - **Memory chip** — shows the live memory count; click jumps to the Memory view.
-- **Prompt Optimizer wand** — one click suggests an improved prompt (see §5).
+- **Prompt Optimizer wand** — one click suggests an improved prompt (see §8).
 
-### 4.3 Agent Memory — the 3-layer memory engine
+### 7.3 Agent Memory — the 3-layer memory engine
 
 The flagship feature. `src/lib/memory.ts` implements three complementary memory layers, mirroring how production agent frameworks handle long-term context:
 
@@ -173,14 +236,14 @@ The flagship feature. `src/lib/memory.ts` implements three complementary memory 
 
 **Verified behavior:** telling the agent "my name is Omar, AI engineer from Cairo…" produces 6 categorized memories; a *brand-new* conversation recalls all facts perfectly; new facts (e.g. "loves Egyptian food, especially koshary") are auto-extracted mid-session; a seeded 30-message conversation gets an accurate rolling summary after one more exchange.
 
-### 4.4 Vision Analysis
+### 7.4 Vision Analysis
 
 - Drag & drop **and** file-picker upload with preview.
 - The image is sent as a base64 data URL to the VLM (glm-5v-turbo) via `/api/vision`.
 - Example prompts + free-form questions; answers render as rich markdown (OCR, objects, scenes, relationships).
 - Prompt Optimizer integration (vision mode).
 
-### 4.5 Image Studio — async job queue pipeline
+### 7.5 Image Studio — async job queue pipeline
 
 Text-to-image with **five aspect ratios** (1024×1024, 1152×864, 1344×768, 864×1152, 768×1344) and a persistent gallery. The generation pipeline is fully asynchronous:
 
@@ -211,7 +274,7 @@ sequenceDiagram
 - Gallery cards have hover overlays with prompt, size, timestamp, download and delete.
 - Prompt Optimizer integration (image mode).
 
-### 4.6 Speech Lab (STT + TTS)
+### 7.6 Speech Lab (STT + TTS)
 
 **Speech-to-Text panel:**
 - Upload an audio file **or** record from the mic.
@@ -225,7 +288,7 @@ sequenceDiagram
 
 ---
 
-## 5. Cross-Cutting Feature: Prompt Optimizer
+## 8. Cross-Cutting Feature: Prompt Optimizer
 
 Available in **all three prompt-based modules** (Chat composer, Image Studio, Vision) via a wand button.
 
@@ -239,7 +302,7 @@ Available in **all three prompt-based modules** (Chat composer, Image Studio, Vi
 
 ---
 
-## 6. API Reference
+## 9. API Reference
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -263,7 +326,7 @@ Available in **all three prompt-based modules** (Chat composer, Image Studio, Vi
 
 ---
 
-## 7. Database Schema
+## 10. Database Schema
 
 ```prisma
 model Conversation {
@@ -331,25 +394,25 @@ model PromptOptimization {
 
 ---
 
-## 8. Engineering War Stories
+## 11. Engineering War Stories
 
 The most valuable part of this project is what was learned **debugging real failures**. Each story below is fully reproducible and was verified end-to-end after the fix.
 
-### 8.1 Arabic prompts were false-flagged by the image safety filter
+### 11.1 Arabic prompts were false-flagged by the image safety filter
 
 - **Symptom:** innocent Arabic prompts (e.g. *"a floating city above clouds at sunset"*) failed with error `1301` (content filter), while the exact same prompt in English succeeded.
 - **Diagnosis:** the diffusion model cannot parse Arabic script; its safety filter flags anything unparsable as unsafe. The existing LLM "safe rewriter" mirrored the input language — so its Arabic rewrite failed too.
 - **Fix:** a **Stage-0 translation pass** — any Arabic (or other non-Latin/CJK) prompt is LLM-translated into a rich English diffusion prompt *before* the image API call, and the rewriter is now instructed to always answer in English. The UI shows a transparent toast with the translated prompt.
 - **Result:** the previously-failing prompt generates in ~36s with a faithful English translation.
 
-### 8.2 "Every generation fails" — the proxy timeout illusion
+### 11.2 "Every generation fails" — the proxy timeout illusion
 
 - **Symptom:** every image request returned `Generation failed — Unexpected token '<', "<html> <h"...` — the frontend was receiving an HTML **504 Gateway Time-out** page instead of JSON.
 - **Diagnosis (the twist):** the database showed 25 images generated successfully — including the *same prompt three times in three minutes* (04:29, 04:30, 04:31). The user kept retrying because the browser showed an error, while the server happily completed and saved every generation. Diffusion takes 25–80s; the edge proxy cut the connection mid-flight.
-- **Fix:** the **async job-queue architecture** (§4.5) — the request returns in <1s, the job runs detached with a 180s safety timeout, the gallery polls. No HTTP request can ever outlive a proxy timeout again.
+- **Fix:** the **async job-queue architecture** (§7.5) — the request returns in <1s, the job runs detached with a 180s safety timeout, the gallery polls. No HTTP request can ever outlive a proxy timeout again.
 - **Bonus fixes discovered along the way:** gallery images now render at their true aspect ratios (they were square-cropped before), and all 25 "lost" images became visible to the user.
 
-### 8.3 The STT model was "very very bad" — a forensic ASR investigation
+### 11.3 The STT model was "very very bad" — a forensic ASR investigation
 
 - **Symptom:** the user reported catastrophic transcription quality.
 - **Investigation (5 probe scripts, kept as an evidence trail):**
@@ -360,30 +423,30 @@ The most valuable part of this project is what was learned **debugging real fail
   - Creative probe: wrapping audio in an mp4 for the VLM → processes frames but returns empty content → no audio modality.
 - **Verdict:** the upstream ASR engine fundamentally supports English & Chinese only — an upstream platform limitation, not fixable client-side.
 - **Shipped mitigations:** `withRateLimitRetry` (exponential backoff on 429), friendly rate-limit errors, script detection (`detectScript`), amber per-transcript accuracy warnings for Arabic, chat-mic toast, and honest language-support notices in the UI.
-- **CV takeaway:** *measure, don't guess* — the same complaint could have been "fixed" with three useless retries; instead it was root-caused with a reproducible probe matrix.
+- **Key takeaway:** *measure, don't guess* — the same complaint could have been "fixed" with three useless retries; instead it was root-caused with a reproducible probe matrix.
 
-### 8.4 Aggressive 429 rate limiting on audio endpoints
+### 11.4 Aggressive 429 rate limiting on audio endpoints
 
 - Bursty ASR/TTS usage triggered raw `429 Too many requests` errors surfacing to users; recovery window measured at 3–13 minutes.
 - **Fix:** `withRateLimitRetry` (§ retry helper) + tailored user-facing messages ("wait a few minutes"), verified with a mock-based script.
 
-### 8.5 Assistant replies vanished in brand-new conversations
+### 11.5 Assistant replies vanished in brand-new conversations
 
 - **Root cause:** a stale `conversationId` closure in the chat `finally` block — after the server assigned a *new* conversation id (via `X-Conversation-Id`), the UI kept refetching the *old* (null) id.
 - **Fix:** capture the active conversation id locally from the response header before the finally-block runs.
 
-### 8.6 Dev-server process management in the sandbox
+### 11.6 Dev-server process management in the sandbox
 
 - The sandbox reaps session-spawned processes at tool-call boundaries; a naive `nohup … &` dies with the session.
 - **Pattern:** double-fork via `bash -c 'nohup cmd &disown'` reparents the dev server to PID 1 so it survives. (Also: a Prisma client regeneration always requires a dev-server restart.)
 
-### 8.7 Audio duration limit
+### 11.7 Audio duration limit
 
 - The ASR endpoint enforces 0–30s per file (error `1214`); the UI surfaces this as a clear validation message instead of a raw 500.
 
 ---
 
-## 9. Frontend Engineering Details
+## 12. Frontend Engineering Details
 
 - **App shell** — `h-dvh` flex column: header + (desktop sidebar / mobile horizontal tabs) + view container + **sticky footer** (pinned via `mt-auto`, respects safe-area insets; verified at 390px and 1440px).
 - **Theme** — dark by default via `next-themes`; emerald accent palette; custom scrollbars; streaming cursor animation.
@@ -395,7 +458,7 @@ The most valuable part of this project is what was learned **debugging real fail
 
 ---
 
-## 10. Verification Methodology
+## 13. Verification Methodology
 
 Every feature was verified with the same strict loop:
 
@@ -409,7 +472,7 @@ Verified scenarios include: SSE streaming with markdown code blocks; cross-sessi
 
 ---
 
-## 11. Setup & Running Locally
+## 14. Setup & Running Locally
 
 ### Prerequisites
 
@@ -446,7 +509,7 @@ bun run dev        # http://localhost:3000
 
 ---
 
-## 12. Project Structure
+## 15. Project Structure
 
 ```
 nexus-ai-studio/
@@ -513,8 +576,8 @@ nexus-ai-studio/
 
 ---
 
-## 13. Author
+## 16. Author
 
 **farid248** — [github.com/farid248](https://github.com/farid248)
 
-Built as an AI-Engineering portfolio project demonstrating: multimodal AI integration, streaming architectures, long-term agent memory, meta-prompting, async job queues, and production-grade debugging of real-world model/platform limitations.
+Built end-to-end — frontend, backend, database and AI integrations — demonstrating: multimodal AI integration, streaming architectures, long-term agent memory, meta-prompting, async job queues, and production-grade debugging of real-world model and platform limitations.

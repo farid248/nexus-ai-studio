@@ -23,7 +23,7 @@ Text-to-image with async job queue · Speech-to-text · Text-to-speech
 
 ## ✨ What is this?
 
-A full-stack AI portfolio project demonstrating how to ship **real** multimodal AI features — including the unglamorous parts nobody demos: safety-filter false positives, proxy timeouts, rate limits, and models that don't speak your users' language. Every feature was verified end-to-end in a real browser with a **zero-console-error policy**.
+A full-stack AI platform demonstrating how to ship **real** multimodal AI features — including the unglamorous parts nobody demos: safety-filter false positives, proxy timeouts, rate limits, and models that don't speak your users' language. Every feature was verified end-to-end in a real browser with a **zero-console-error policy**.
 
 | Module | Highlights |
 |---|---|
@@ -35,6 +35,25 @@ A full-stack AI portfolio project demonstrating how to ship **real** multimodal 
 | 📊 **Dashboard** | Live stats, architecture diagram, engineering highlights |
 
 **Plus a cross-cutting Prompt Optimizer**: in every prompt field, one click asks the system to meta-prompt an improved version (mode-specific strategies, same-language output, applied-rate analytics).
+
+---
+
+## 🤖 AI Models and Selection Rationale
+
+| Task | Model / Engine | Why it was chosen |
+|---|---|---|
+| Chat | **GLM-4.6** (instruction-tuned LLM) | Fast time-to-first-token — critical for SSE streaming UX; per-call parameter control |
+| Vision | **GLM VLM Turbo** (vision-language) | Interactive latency; base64 image input → structured markdown output |
+| Images | **Diffusion model** | 5 aspect ratios up to 1440px in a single call |
+| Speech | **ASR + TTS engines** | 7 voices with adjustable speed; honest language-support UX |
+
+Models are consumed as managed API services through one server-side SDK singleton — a deliberate trade for predictable latency and zero GPU operations, which puts the quality engineering at the prompt and orchestration layer: [**how output quality is engineered**](docs/DOCUMENTATION_EN.md#4-how-output-quality-is-engineered).
+
+---
+
+## 🧰 Skills This Build Exercises
+
+TypeScript strict contracts · SSE streaming · async job queues · Prisma schema design · TanStack Query conditional polling · Zustand · prompt engineering · root-cause debugging · browser-level E2E verification — [each skill mapped to where it serves in the project](docs/DOCUMENTATION_EN.md#5-skills-needed-and-what-each-one-serves).
 
 ---
 
@@ -63,22 +82,40 @@ flowchart TD
 
 ---
 
-## 🚀 Quick start
+## 🚀 Getting started
+
+**Prerequisites:** [Bun](https://bun.sh) ≥ 1.3 (or Node.js ≥ 20) and Git.
 
 ```bash
-bun install                 # or npm install
-echo 'DATABASE_URL="file:./db/custom.db"' > .env
-bun run db:push             # create SQLite schema
-bun run dev                 # http://localhost:3000
+git clone https://github.com/farid248/nexus-ai-studio.git
+cd nexus-ai-studio
+bun install                      # or: npm install
+cp .env.example .env             # SQLite database location
+bun run db:push                  # create the 6-table schema
+bun run dev                      # → http://localhost:3000
 ```
 
-> The AI layer uses `z-ai-web-dev-sdk` (server-side only, singleton in `src/lib/zai.ts`). Provide your own Z.AI credentials through the SDK's configuration mechanism — that file is the single integration point if you want to swap providers.
+### AI credentials
+
+The six AI capabilities (chat, vision, image generation, STT, TTS) call GLM-family models through `z-ai-web-dev-sdk`, which reads its credentials from a JSON config file. Create **`.z-ai-config`** in the project root (or `~/.z-ai-config`):
+
+```json
+{
+  "baseUrl": "https://YOUR_ZAI_API_BASE/v1",
+  "apiKey": "YOUR_API_KEY",
+  "token": "YOUR_ACCESS_TOKEN",
+  "chatId": "OPTIONAL_CHAT_ID",
+  "userId": "OPTIONAL_USER_ID"
+}
+```
+
+Without this file the app still boots — the UI, dashboard, SQLite persistence and conversation history all work — but every model call returns an error. All AI access is funneled through one server-side singleton (`src/lib/zai.ts`), which re-reads this file on every call: rotate the token and the next request picks it up without a restart. Swapping in a different provider means editing that single integration point.
 
 ---
 
-## 🧩 Engineering highlights (the good part)
+## 🛠️ Engineering highlights
 
-These are real debugging stories, each verified end-to-end — details in [the docs](docs/DOCUMENTATION_EN.md#8-engineering-war-stories):
+These are real debugging stories, each verified end-to-end — details in [the docs](docs/DOCUMENTATION_EN.md#11-engineering-war-stories):
 
 - **"Every generation fails" was a proxy-timeout illusion** — the edge proxy returned an HTML 504 page mid-generation while the server happily finished and saved every image (the same user prompt appeared 3× in the DB within 3 minutes). Fixed with the async job-queue architecture: no HTTP request can outlive any timeout.
 - **Arabic prompts were false-flagged by the image safety filter** — the diffusion model can't parse Arabic script, so innocent prompts failed. Fixed with a Stage-0 LLM translation pass + an always-English safety rewriter.
