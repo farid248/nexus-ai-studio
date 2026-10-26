@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { getZai } from "@/lib/zai";
+import { getZai, invalidateZai, isAuthError } from "@/lib/zai";
 import {
   buildMemoryContext,
   MEMORY_GUIDANCE,
@@ -115,12 +115,25 @@ export async function POST(req: NextRequest) {
       { role: "user", content: message },
     ];
 
-    const zai = await getZai();
-    const upstream = await zai.chat.completions.create({
-      messages,
-      stream: true,
-      thinking: { type: "disabled" },
-    });
+    const buildRequest = () =>
+      getZai().then((client) =>
+        client.chat.completions.create({
+          messages,
+          stream: true,
+          thinking: { type: "disabled" },
+        })
+      );
+
+    let upstream: Awaited<ReturnType<typeof buildRequest>>;
+    try {
+      upstream = await buildRequest();
+    } catch (error) {
+      // Auth failures mean the cached SDK client was built before the
+      // current token was provisioned — rebuild once from disk and retry.
+      if (!isAuthError(error)) throw error;
+      invalidateZai();
+      upstream = await buildRequest();
+    }
 
     // Non-streaming fallback: SDK returned a JSON completion instead of a stream
     if (!(upstream instanceof ReadableStream)) {

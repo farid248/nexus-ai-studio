@@ -27,6 +27,24 @@ const EXAMPLE_PROMPTS = [
 ];
 
 const MAX_SIZE = 8 * 1024 * 1024; // 8 MB
+const MAX_DIMENSION = 2048; // long-side cap — keeps the VLM payload small and fast
+const KEEP_ORIGINAL_LIMIT = 1.5 * 1024 * 1024; // under this, keep the original bytes as-is
+const DIRECT_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const ALPHA_MIMES = new Set([
+  "image/png",
+  "image/webp",
+  "image/avif",
+  "image/gif",
+  "image/apng",
+]);
+
+interface FileMeta {
+  name: string;
+  width: number;
+  height: number;
+  sizeKb: number;
+  converted: boolean;
+}
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -37,9 +55,48 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+/** Decode a data URL in the browser — the real gate for "is this an image?". */
+function decodeImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () =>
+      img.naturalWidth > 0 && img.naturalHeight > 0
+        ? resolve(img)
+        : reject(new Error("Image has no dimensions"));
+    img.onerror = () => reject(new Error("Browser cannot decode this image"));
+    img.src = dataUrl;
+  });
+}
+
+/** Re-encode through a canvas: normalizes exotic formats and caps the size. */
+function reencodeImage(
+  img: HTMLImageElement,
+  mime: "image/png" | "image/jpeg"
+): string {
+  const scale = Math.min(
+    1,
+    MAX_DIMENSION / Math.max(img.naturalWidth, img.naturalHeight)
+  );
+  const width = Math.max(1, Math.round(img.naturalWidth * scale));
+  const height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas is unavailable in this browser");
+  if (mime === "image/jpeg") {
+    // Flatten transparency onto white — JPEG has no alpha channel.
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL(mime, mime === "image/jpeg" ? 0.92 : undefined);
+}
+
 export function VisionView() {
   const { toast } = useToast();
   const [imageUrl, setImageUrl] = React.useState<string | null>(null);
+  const [fileMeta, setFileMeta] = React.useState<FileMeta | null>(null);
   const [prompt, setPrompt] = React.useState("");
   const [analysis, setAnalysis] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -47,14 +104,6 @@ export function VisionView() {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleFile = async (file: File) => {
-    if (!file.type.startsWith("image/")) {
-      toast({
-        title: "Invalid file",
-        description: "Please choose an image file (PNG, JPEG, WebP…).",
-        variant: "destructive",
-      });
-      return;
-    }
     if (file.size > MAX_SIZE) {
       toast({
         title: "File too large",
@@ -63,8 +112,66 @@ export function VisionView() {
       });
       return;
     }
-    const dataUrl = await fileToDataUrl(file);
-    setImageUrl(dataUrl);
+
+    let rawUrl: string;
+    try {
+      rawUrl = await fileToDataUrl(file);
+    } catch {
+      toast({
+        title: "Could not read file",
+        description:
+          "The file could not be read from disk. Try re-saving it and upload again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // The decode check is the real validation: Windows often reports no MIME
+    // type for formats like .jfif/.pjp, and some files are renamed HEIC/AVIF
+    // images. If the browser can't decode it, the vision model can't either.
+    let img: HTMLImageElement;
+    try {
+      img = await decodeImage(rawUrl);
+    } catch {
+      toast({
+        title: "This image can't be displayed",
+        description:
+          "The browser cannot decode this file — it may be corrupted, or a HEIC/AVIF/TIFF image renamed with a .png extension. Convert it to PNG or JPEG (open it in any image viewer → Save As) and upload again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Normalize exotic formats and oversized images into something every
+    // vision model accepts: PNG when transparency matters, JPEG otherwise.
+    const oversized =
+      Math.max(img.naturalWidth, img.naturalHeight) > MAX_DIMENSION;
+    const exotic = !DIRECT_MIMES.has(file.type);
+    const heavy = rawUrl.length > KEEP_ORIGINAL_LIMIT;
+    let finalUrl = rawUrl;
+    let converted = false;
+
+    if (oversized || exotic || heavy) {
+      try {
+        const preferPng =
+          file.type === "image/png" || ALPHA_MIMES.has(file.type) || !file.type;
+        finalUrl = reencodeImage(img, preferPng ? "image/png" : "image/jpeg");
+        converted = true;
+      } catch {
+        // Canvas failed (rare) — fall back to the original bytes.
+        finalUrl = rawUrl;
+        converted = false;
+      }
+    }
+
+    setImageUrl(finalUrl);
+    setFileMeta({
+      name: file.name,
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+      sizeKb: Math.round(file.size / 1024),
+      converted,
+    });
     setAnalysis(null);
   };
 
@@ -149,13 +256,23 @@ export function VisionView() {
                         className="max-h-72 w-full object-contain bg-black/20"
                       />
                       <button
-                        onClick={() => setImageUrl(null)}
+                        onClick={() => {
+                          setImageUrl(null);
+                          setFileMeta(null);
+                        }}
                         aria-label="Remove image"
                         className="absolute right-2 top-2 rounded-md bg-black/60 p-1.5 text-white transition-colors hover:bg-destructive"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
+                    {fileMeta && (
+                      <p className="truncate text-xs text-muted-foreground">
+                        {fileMeta.name} · {fileMeta.width}×{fileMeta.height} ·{" "}
+                        {fileMeta.sizeKb} KB
+                        {fileMeta.converted && " · auto-converted"}
+                      </p>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
@@ -192,7 +309,7 @@ export function VisionView() {
                     <div className="text-center">
                       <p className="text-sm font-medium">Drop an image here</p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        or click to browse · PNG, JPEG, WebP · max 8 MB
+                        or click to browse · PNG, JPEG, WebP, GIF, AVIF · max 8 MB
                       </p>
                     </div>
                   </button>

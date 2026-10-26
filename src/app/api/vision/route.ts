@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import type { CreateChatCompletionVisionBody } from "z-ai-web-dev-sdk";
-import { getZai } from "@/lib/zai";
+import { getZai, invalidateZai, isAuthError } from "@/lib/zai";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,8 +35,6 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: "Image payload too large" }, { status: 413 });
     }
 
-    const zai = await getZai();
-
     const visionBody = {
       messages: [
         {
@@ -50,9 +48,22 @@ export async function POST(req: NextRequest) {
       thinking: { type: "disabled" as const },
     };
 
-    const response = await zai.chat.completions.createVision(
-      visionBody as CreateChatCompletionVisionBody
-    );
+    const buildRequest = () =>
+      getZai().then((client) =>
+        client.chat.completions.createVision(
+          visionBody as CreateChatCompletionVisionBody
+        )
+      );
+
+    let response: Awaited<ReturnType<typeof buildRequest>>;
+    try {
+      response = await buildRequest();
+    } catch (error) {
+      // Cached SDK client may predate the current token — rebuild and retry.
+      if (!isAuthError(error)) throw error;
+      invalidateZai();
+      response = await buildRequest();
+    }
 
     const analysis: string | undefined = response?.choices?.[0]?.message?.content;
     if (!analysis || !analysis.trim()) {
